@@ -59,14 +59,21 @@ RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DSTRATA_DSV41_FQ_OP=ON -DSTRATA_DSV41_HC_MIX=ON \
     && cmake --build build --target ${BUILD_TARGETS} -j "$(nproc)"
 
-# stage what the runtime needs: the engine binaries, any shared objects (static ggml today, so usually none),
-# the Python serving layer and the tools it imports
-RUN set -e; mkdir -p /stage/bin /stage/lib; \
+# Stage what the runtime needs: the engine binaries (640 MB of engine is about 580 MB of symbol table: strip it),
+# any shared objects (ggml links statically today, so usually none) and the Python serving layer.
+# The app tree is what serve/server.py imports at run time - itself, strata_control, strata_cli and their data -
+# plus the tools an operator reaches for inside the container (export_tokenizer.py, throughput.py).
+# C++ sources, the build tree and the vendored llama.cpp stay out.
+RUN set -e; mkdir -p /stage/bin /stage/lib /stage/app; \
     for t in xolotl-inkling xolotl-inkling-dspark xolotl-dense strata; do \
         [ -f "build/$t" ] && cp "build/$t" /stage/bin/ || true; done; \
     strip --strip-debug /stage/bin/* 2>/dev/null || strip /stage/bin/* || true; \
     find build -name '*.so*' -maxdepth 3 -exec cp -av {} /stage/lib/ \; 2>/dev/null || true; \
-    ldd /stage/bin/xolotl-inkling
+    tar -cf - serve strata_control strata_cli tools configs data packaging bin \
+        bench/prompts docs/MANAGEMENT_PROTOCOL.md docs/TERMINAL_LAUNCH.md ref/load.py \
+        strata.py setup.py CMakeLists.txt requirements.txt requirements-monitor.txt 2>/dev/null \
+        | tar -xf - -C /stage/app; \
+    du -sh /stage/app /stage/bin; ldd /stage/bin/xolotl-inkling
 
 # ---- 2. the runtime --------------------------------------------------------------------
 FROM ${RUNTIME_IMAGE}
@@ -85,17 +92,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tini ca-certificates python3 libgomp1 libatomic1 procps curl \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
 
-COPY --from=build /venv /opt/xolotl/venv
+COPY --from=build /venv      /opt/xolotl/venv
 COPY --from=build /stage/bin /opt/xolotl/bin
 COPY --from=build /stage/lib /opt/xolotl/lib
-# the serving layer and the tools it imports (no C++ sources, no build tree, no vendored llama.cpp)
-COPY serve/                       /opt/xolotl/app/serve/
-COPY tools/                       /opt/xolotl/app/tools/
-COPY configs/                     /opt/xolotl/app/configs/
-COPY data/                        /opt/xolotl/app/data/
-COPY bench/                       /opt/xolotl/app/bench/
-COPY bin/                         /opt/xolotl/app/bin/
-COPY strata.py setup.py requirements.txt /opt/xolotl/app/
+COPY --from=build /stage/app /opt/xolotl/app
 COPY docker/inkling-entrypoint.sh /opt/xolotl/entrypoint.sh
 # the venv is a thin layer over the system interpreter, so prove it resolves inside THIS image
 RUN chmod 0755 /opt/xolotl/entrypoint.sh /opt/xolotl/bin/* 2>/dev/null || true

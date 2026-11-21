@@ -162,14 +162,28 @@ jobs:
         run: |
           set -eu
           ref="$IMAGE:${{ steps.plan.outputs.date }}-${{ steps.plan.outputs.sha }}"
-          docker pull --platform linux/amd64 "$ref"
+          docker pull --platform linux/amd64 "$ref" >/dev/null
           docker run --rm --entrypoint /bin/sh "$ref" -c '
             set -e
             echo "engines:"; ls -l /opt/xolotl/bin
-            echo "missing shared objects (libcublas is on purpose: the GPU driver and the CUDA runtime image supply it):"
-            ldd /opt/xolotl/bin/xolotl-inkling | grep "not found" || echo "  none"
-            /opt/xolotl/venv/bin/python3 -c "import serve.server, sys; print(\"serve.server imports on\", sys.version.split()[0])"
-            echo "engine help (first lines):"; /opt/xolotl/bin/xolotl-inkling --help | head -5 || true
+            echo "missing shared objects (libcuda.so.1 is expected: the GPU driver supplies it at run time):"
+            ldd /opt/xolotl/bin/xolotl-inkling | grep "not found" | grep -v libcuda.so.1 || echo "  none unexpected"
+            /opt/xolotl/venv/bin/python3 -c "import serve.server, strata_control, strata_cli; print(\"serving layer imports ok\")"
+            /opt/xolotl/bin/xolotl-inkling --help | head -3
+            # the real server on its scripted mock engine: entrypoint, HTTP layer and /health, no GPU needed
+            (/opt/xolotl/venv/bin/python3 -m serve.server --engine mock --host 127.0.0.1 --port 8095 --no-api-key \
+               > /tmp/mock.log 2>&1) &
+            i=0
+            until curl -fsS http://127.0.0.1:8095/health > /tmp/health.json 2>/dev/null; do
+              i=$((i + 1))
+              if [ "$i" -gt 90 ]; then echo "the server never answered /health:"; tail -30 /tmp/mock.log; exit 1; fi
+              sleep 1
+            done
+            echo "mock server /health:"; cat /tmp/health.json; echo
+            echo "mock server /v1/models:"; curl -fsS http://127.0.0.1:8095/v1/models
+            echo
+            # and the entrypoint config generator, with no model mounted (it must fail with a clear message)
+            timeout 30 /opt/xolotl/entrypoint.sh serve 2>&1 | tail -2 || true
           '
 
       - name: Write the release notes

@@ -58,7 +58,9 @@ if [ ! -f "$CONFIG" ]; then
     ctx=${XOLOTL_CTX:-${INKLING_CTX:-32768}}
     name=${XOLOTL_MODEL_NAME:-${INKLING_MODEL_NAME:-$default_name}}
 
-    eng_args="--native $model --context $ctx"
+    # --context for the engine, --max-context for the server: serve/server.py reads its own context budget from
+    # --max-context (it is refreshed from the engine's READY line, but a config that says both cannot disagree)
+    eng_args="--native $model --context $ctx --max-context $ctx"
     [ -n "${INKLING_KV_TYPE:-}" ]  && eng_args="$eng_args --kv-type $INKLING_KV_TYPE"
     [ -n "${INKLING_DSPARK:-}" ]   && eng_args="$eng_args --dspark $INKLING_DSPARK"
     [ -n "${INKLING_CPU_EXPS:-}" ] && eng_args="$eng_args --cpu-exps $INKLING_CPU_EXPS"
